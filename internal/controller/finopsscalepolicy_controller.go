@@ -1,0 +1,474 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+	"strconv"
+
+	"github.com/robfig/cron/v3"
+	appsv1 "k8s.io/api/apps/v1"
+	//metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	finopsv1alpha1 "github.com/chrissam/k8s-scaling-operator/api/v1alpha1"
+)
+
+const (
+	originalReplicasAnnotation = "finops.dev/original-replicas"
+)
+
+
+
+// +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsscalepolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsscalepolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsscalepolicies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsscalepolicies,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsoperatorconfigs,verbs=get;list;update;patch;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+
+// FinOpsScalePolicyReconciler reconciles a FinOpsScalePolicy object
+type FinOpsScalePolicyReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+	Config *finopsv1alpha1.FinOpsOperatorConfig // Store global config
+	mutex  sync.Mutex                           // Protect concurrent Reconciles
+	sem    chan struct{}                        // Semaphore for maxParallelOperations
+}
+
+// Load global FinOpsOperatorConfig into memory
+func (r *FinOpsScalePolicyReconciler) loadConfig(ctx context.Context) error {
+	log := log.FromContext(ctx)
+	log.Info("Loading FinOpsOperatorConfig...")
+
+	var configList finopsv1alpha1.FinOpsOperatorConfigList
+	if err := r.List(ctx, &configList); err != nil {
+		log.Error(err, "Failed to list FinOpsOperatorConfig")
+		return err
+	}
+
+	if len(configList.Items) > 0 {
+		r.Config = &configList.Items[0] // Store first found config
+		log.Info("Loaded FinOpsOperatorConfig", "config", r.Config.Name)
+	} else {
+		log.Info("No FinOpsOperatorConfig found, using default values")
+
+		// Set default values
+		r.Config = &finopsv1alpha1.FinOpsOperatorConfig{
+			Spec: finopsv1alpha1.FinOpsOperatorConfigSpec{
+				ExcludedNamespaces:    []string{"kube-system", "kube-public", "kube-node-lease", "local-path-storage"},
+				MaxParallelOperations: 5,
+				CheckInterval:         "5m",
+				ForceScaleDown:        false,
+			},
+		}
+	}
+
+	// Initialize semaphore
+	r.sem = make(chan struct{}, r.Config.Spec.MaxParallelOperations)
+
+	return nil
+}
+
+// Reconcile is part of the main kubernetes reconciliation loop which aims to
+// move the current state of the cluster closer to the desired state.
+func (r *FinOpsScalePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := log.FromContext(ctx).WithValues("Reconcile", req.NamespacedName)
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	log.Info("Reconciling...")
+
+	// Load global FinOpsOperatorConfig
+	if r.Config == nil {
+		if err := r.loadConfig(ctx); err != nil {
+			log.Error(err, "Failed to load FinOpsOperatorConfig")
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Handle FinOpsOperatorConfig changes
+	if req.NamespacedName.Name == "global-config" && req.NamespacedName.Namespace == "scaling-operator-system" {
+		log.Info("Detected FinOpsOperatorConfig change, updating settings")
+		if err := r.loadConfig(ctx); err != nil {
+			log.Error(err, "Failed to reload FinOpsOperatorConfig")
+			return ctrl.Result{}, err
+		}
+		// Force immediate requeue after config change
+		return r.reconcileAllNamespaces(ctx) 
+	}
+
+	// Trigger periodic scan or specific namespace reconcile
+	if req.NamespacedName.Name == "" && req.NamespacedName.Namespace == "" {
+		return r.reconcileAllNamespaces(ctx)
+	}
+
+	if err := r.reconcileNamespace(ctx, req.NamespacedName.Namespace); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *FinOpsScalePolicyReconciler) reconcileAllNamespaces(ctx context.Context) (ctrl.Result, error) {
+	log := log.FromContext(ctx).WithValues("ReconcileAll", "cluster")
+	log.Info("Starting cluster-wide scan...")
+
+	var policies finopsv1alpha1.FinOpsScalePolicyList
+	if err := r.List(ctx, &policies); err != nil {
+		log.Error(err, "Failed to list FinOpsScalePolicies")
+		return ctrl.Result{}, err
+	}
+
+	namespaces := map[string]bool{}
+	for _, policy := range policies.Items {
+		namespaces[policy.Namespace] = true
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(namespaces))
+
+	for ns := range namespaces {
+		wg.Add(1)
+		go func(namespace string) {
+			defer wg.Done()
+			r.sem <- struct{}{}        // Acquire semaphore
+			defer func() { <-r.sem }() // Release semaphore
+			if err := r.reconcileNamespace(ctx, namespace); err != nil {
+				errChan <- err
+			}
+		}(ns)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			log.Error(err, "Error during namespace reconciliation")
+			return ctrl.Result{}, err // Or collect errors and return a combined error
+		}
+	}
+
+	interval, err := time.ParseDuration(r.Config.Spec.CheckInterval)
+	if err != nil {
+		log.Error(err, "Invalid CheckInterval, using default 5m")
+		interval = 5 * time.Minute
+	}
+
+	log.Info("Cluster-wide scan completed.", "CheckInterval", interval)
+	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, namespace string) error {
+	log := log.FromContext(ctx).WithValues("ReconcileNamespace", namespace)
+	log.Info("Entering reconcileNamespace", "namespace", namespace)
+
+	// Check namespace exclusion
+	for _, excludedNS := range r.Config.Spec.ExcludedNamespaces {
+		if namespace == excludedNS {
+			log.Info("Skipping excluded namespace", "namespace", namespace)
+			return nil
+		}
+	}
+
+	var policies finopsv1alpha1.FinOpsScalePolicyList
+	if err := r.List(ctx, &policies, client.InNamespace(namespace)); err != nil {
+		log.Error(err, "Failed to list FinOpsScalePolicies in namespace", "namespace", namespace)
+		return err
+	}
+
+	for _, policy := range policies.Items {
+		if policy.Spec.OptOut {
+			log.Info("OptOut is true, skipping scaling for this namespace", "namespace", namespace)
+			return nil
+		}
+
+		var deployments appsv1.DeploymentList
+		if err := r.List(ctx, &deployments, client.InNamespace(namespace)); err != nil {
+			log.Error(err, "Failed to list deployments in namespace", "namespace", namespace)
+			return err
+		}
+
+		for _, deployment := range deployments.Items {
+			if r.isDeploymentExcluded(deployment.Namespace, deployment.Name) {
+				log.Info("Skipping excluded deployment", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				continue
+			}
+
+			deploymentSchedules := policy.Spec.DefaultSchedule
+			minReplicas := int32(0)
+			for _, depPolicy := range policy.Spec.Deployments {
+				if depPolicy.Name == deployment.Name {
+					deploymentSchedules = depPolicy.Schedule
+					minReplicas = depPolicy.MinReplicas
+					break
+				}
+			}
+
+			if r.isScalingTime(deploymentSchedules, policy.Spec.Timezone, time.Now()) {
+				log.Info("Scaling time is true", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				originalReplicas, err := r.getOriginalReplicas(&deployment)
+				if err != nil {
+					log.Error(err, "Failed to get original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+					return err
+				}
+				// Robust nil checks
+				if originalReplicas == nil && *deployment.Spec.Replicas > minReplicas {
+					log.Info("Original replicas not found, storing...", "deployment", deployment.Name, "namespace", deployment.Namespace, "replicas", *deployment.Spec.Replicas)
+					if err := r.storeOriginalReplicas(&deployment, *deployment.Spec.Replicas); err != nil {
+						log.Error(err, "Failed to store original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+						return err
+					}
+					log.Info("Stored original replicas", "deployment", deployment.Name, "namespace", deployment.Namespace, "replicas", *deployment.Spec.Replicas)
+					if err := r.scaleDeployment(ctx, &deployment, minReplicas); err != nil {
+						log.Error(err, "Failed to scale down deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "minReplicas", minReplicas)
+						return err
+					}
+					log.Info("Successfully scaled down deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "minReplicas", minReplicas)
+				} else if originalReplicas != nil && *deployment.Spec.Replicas > minReplicas {
+					log.Info("Original replicas found", "deployment", deployment.Name, "namespace", deployment.Namespace, "originalReplicas", *originalReplicas)
+					if err := r.scaleDeployment(ctx, &deployment, minReplicas); err != nil {
+						log.Error(err, "Failed to scale down deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "minReplicas", minReplicas)
+						return err
+					}
+					log.Info("Successfully scaled down deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "minReplicas", minReplicas)
+
+				} else {
+					log.Info("Original replicas not found", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				}
+			} else {
+				log.Info("Scaling time is false", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				originalReplicas, err := r.getOriginalReplicas(&deployment)
+				if err != nil {
+					log.Error(err, "Failed to get original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+					return err
+				}
+				// Robust nil checks
+				if originalReplicas != nil && *deployment.Spec.Replicas != *originalReplicas {
+					log.Info("Original replicas changed, scaling up...", "deployment", deployment.Name, "namespace", deployment.Namespace, "originalReplicas", *originalReplicas, "currentReplicas", *deployment.Spec.Replicas)
+					if err := r.scaleDeployment(ctx, &deployment, *originalReplicas); err != nil {
+						log.Error(err, "Failed to scale up deployment", "deployment", deployment.Name, "namespace", deployment.Namespace)
+						return err
+					}
+					log.Info("Successfully scaled up deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "originalReplicas", *originalReplicas)
+					if err := r.clearOriginalReplicas(&deployment); err != nil {
+						log.Error(err, "Failed to clear original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+						return err
+					}
+					log.Info("Cleared original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				} else {
+					log.Info("No scaling required: Desired replicas match current replicas", "deployment", deployment.Name, "namespace", deployment.Namespace)
+				}
+			}
+		}
+	}
+	log.Info("Finished processing namespace", "namespace", namespace)
+	return nil
+}
+
+
+// isDeploymentExcluded checks if a deployment is globally excluded
+func (r *FinOpsScalePolicyReconciler) isDeploymentExcluded(namespace, name string) bool {
+	for _, excluded := range r.Config.Spec.ExcludedDeployments {
+		if excluded.Namespace == namespace && excluded.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isScalingTime checks if the current time matches any of the cron schedules.
+func (r *FinOpsScalePolicyReconciler) isScalingTime(cronSchedules []string, timezone string, now time.Time) bool {
+	if len(cronSchedules) == 0 {
+		return false
+	}
+
+	loc, err := time.LoadLocation(timezone)
+	if err == nil {
+		//now = now.In(loc)
+		return false
+	}
+
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	for _, cronSchedule := range cronSchedules {
+		schedule, err := parser.Parse(cronSchedule)
+		if err != nil {
+			// Log the error and continue to the next schedule
+			log.Log.Error(err, "Invalid cron schedule", "schedule", cronSchedule)
+			continue
+		}
+
+		nextRun := schedule.Next(now.Add(-time.Minute))
+		// Approximate previous run (similar to before)
+		approxPrevRun := now.Add(time.Hour * -24)
+		for i := 0; i < 1000; i++ {
+			tempNext := schedule.Next(approxPrevRun)
+			if tempNext.Before(now.Add(time.Minute)) && tempNext.After(approxPrevRun) {
+				approxPrevRun = tempNext
+			} else {
+				break
+			}
+			approxPrevRun = approxPrevRun.Add(time.Minute)
+		}
+
+		if now.After(approxPrevRun) && now.Before(nextRun) {
+			return true // Return true if ANY schedule matches
+		}
+	}
+	return false // Return false if NONE of the schedules match
+}
+
+// scaleDeployment scales a deployment to the specified number of replicas
+func (r *FinOpsScalePolicyReconciler) scaleDeployment(ctx context.Context, deployment *appsv1.Deployment, replicas int32) error {
+	log := log.FromContext(ctx)
+
+	patch := client.MergeFrom(deployment.DeepCopy())
+	deployment.Spec.Replicas = &replicas
+	if err := r.Patch(ctx, deployment, patch); err != nil {
+		return err
+	}
+
+	log.Info("Scaled deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "replicas", replicas)
+	return nil
+}
+
+// getOriginalReplicas retrieves the original replica count for a deployment from its annotations.
+func (r *FinOpsScalePolicyReconciler) getOriginalReplicas(deployment *appsv1.Deployment) (*int32, error) {
+    log := log.FromContext(context.Background()).WithValues("getOriginalReplicas", deployment.Name, "namespace", deployment.Namespace) // ADDED
+    log.Info("Entering getOriginalReplicas")                                                                                   // ADDED
+    log.Info("Deployment Annotations", "annotations", deployment.Annotations)                                                 // ADDED
+    if val, ok := deployment.Annotations[originalReplicasAnnotation]; ok {
+        log.Info("Annotation found", "value", val) // ADDED
+        replicas, err := parseInt32(val)
+        if err != nil {
+            log.Error(err, "Invalid value for annotation", "annotation", originalReplicasAnnotation, "error", err)
+            return nil, fmt.Errorf("invalid value for annotation %s: %w", originalReplicasAnnotation, err)
+        }
+        log.Info("Parsed replicas", "replicas", replicas) // ADDED
+        return &replicas, nil
+    }
+    log.Info("Annotation not found") // ADDED
+    return nil, nil
+}
+
+
+// storeOriginalReplicas stores the original replica count for a deployment in its annotations.
+func (r *FinOpsScalePolicyReconciler) storeOriginalReplicas(deployment *appsv1.Deployment, replicas int32) error {
+    log := log.FromContext(context.Background()).WithValues("storeOriginalReplicas", deployment.Name, "namespace", deployment.Namespace)
+    log.Info("Entering storeOriginalReplicas", "replicas", replicas)
+
+    // Fetch the latest version of the deployment to avoid cache inconsistencies
+    latestDeployment := &appsv1.Deployment{}
+    err := r.Get(context.Background(), client.ObjectKey{Name: deployment.Name, Namespace: deployment.Namespace}, latestDeployment)
+    if err != nil {
+        log.Error(err, "Failed to get latest deployment")
+        return err
+    }
+
+    // Log existing annotations
+    if latestDeployment.Annotations != nil {
+        log.Info("Existing annotations", "annotations", latestDeployment.Annotations)
+    } else {
+        log.Info("No existing annotations")
+    }
+
+    // Create a deep copy for modification
+    patchedDeployment := latestDeployment.DeepCopy()
+
+    // Ensure annotations map is initialized
+    if patchedDeployment.Annotations == nil {
+        patchedDeployment.Annotations = make(map[string]string)
+    }
+
+    // Set the annotation
+    annotationValue := fmt.Sprintf("%d", replicas)
+    patchedDeployment.Annotations[originalReplicasAnnotation] = annotationValue
+    log.Info("Set/Updated annotation", "annotation", originalReplicasAnnotation, "value", annotationValue)
+
+    // Apply the patch
+    err = r.Patch(context.Background(), patchedDeployment, client.MergeFrom(latestDeployment))
+    if err != nil {
+        log.Error(err, "Failed to patch deployment with annotation")
+        return err
+    }
+
+    log.Info("Successfully patched deployment with annotation")
+    return nil
+}
+
+
+// clearOriginalReplicas removes the stored original replica count for a deployment from its annotations.
+func (r *FinOpsScalePolicyReconciler) clearOriginalReplicas(deployment *appsv1.Deployment) error {
+    log := log.FromContext(context.Background()).WithValues("clearOriginalReplicas", deployment.Name, "namespace", deployment.Namespace)
+    log.Info("Entering clearOriginalReplicas")
+
+    if deployment.Annotations == nil {
+        log.Info("No annotations present, skipping deletion")
+        return nil
+    }
+
+    // Create a deep copy to avoid modifying the original object directly
+    patchedDeployment := deployment.DeepCopy()
+
+    // Remove the annotation
+    if _, exists := patchedDeployment.Annotations[originalReplicasAnnotation]; exists {
+        delete(patchedDeployment.Annotations, originalReplicasAnnotation)
+        log.Info("Deleted annotation", "annotation", originalReplicasAnnotation)
+
+        // Use StrategicMergeFrom to properly patch the object
+        err := r.Patch(context.Background(), patchedDeployment, client.StrategicMergeFrom(deployment))
+        if err != nil {
+            log.Error(err, "Failed to patch deployment to remove annotation")
+            return err
+        }
+
+        log.Info("Successfully patched deployment to remove annotation")
+        return nil
+    }
+
+    log.Info("Annotation not found, skipping deletion")
+    return nil
+}
+
+
+// parseInt32 helper function to parse string to int32
+func parseInt32(s string) (int32, error) {
+    parsed, err := strconv.ParseInt(s, 10, 32) // Base 10, 32-bit
+    if err != nil {
+        return 0, err
+    }
+    return int32(parsed), nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *FinOpsScalePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&finopsv1alpha1.FinOpsScalePolicy{}).
+		Named("finopsscalepolicy").
+		Watches(&finopsv1alpha1.FinOpsOperatorConfig{}, &handler.EnqueueRequestForObject{}).
+		Complete(r)
+}

@@ -1,0 +1,18 @@
+apiVersion: finops.devopsideas.com/v1alpha1
+kind: FinOpsScalePolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: scaling-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: finopsscalepolicy-sample
+spec:
+  optOut: false  # If true, this namespace is fully excluded from scaling
+  defaultSchedule: "22:00-06:00"  # Optional: default schedule for all deployments in this namespace
+  timezone: "America/Toronto"  # Default UTC, can be overridden per policy
+  deployments:
+    - name: "web-app"
+      schedule: "23:00-05:00"  # Custom scale-down time for this deployment
+      minReplicas: 0
+    - name: "worker-app"
+      schedule: "21:00-07:00"
+      minReplicas: 1

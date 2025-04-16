@@ -1,0 +1,87 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: finopsoperatorconfigs.finops.devopsideas.com
+spec:
+  group: finops.devopsideas.com
+  names:
+    kind: FinOpsOperatorConfig
+    listKind: FinOpsOperatorConfigList
+    plural: finopsoperatorconfigs
+    singular: finopsoperatorconfig
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: FinOpsOperatorConfig is the Schema for the finopsoperatorconfigs
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FinOpsOperatorConfigSpec defines the desired state of FinOpsOperatorConfig.
+            properties:
+              checkInterval:
+                type: string
+              excludedDeployments:
+                items:
+                  description: ExcludedDeploy defines deployments that should never
+                    be scaled down
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
+              excludedNamespaces:
+                description: |-
+                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+                  Important: Run "make" to regenerate code after modifying this file
+                items:
+                  type: string
+                type: array
+              forceScaleDown:
+                type: boolean
+              maxParallelOperations:
+                type: integer
+            type: object
+          status:
+            description: FinOpsOperatorConfigStatus defines the observed state of
+              FinOpsOperatorConfig.
+            properties:
+              active:
+                description: |-
+                  INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+                  Important: Run "make" to regenerate code after modifying this file
+                type: boolean
+            required:
+            - active
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
