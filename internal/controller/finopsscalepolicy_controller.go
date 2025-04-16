@@ -222,6 +222,7 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 
 			var schedules []*finopsv1alpha1.ScheduleSpec // Correct type
 			minReplicas := int32(0) // Default to 0 if not set
+			depOptOut := false
 
 			if policy.Spec.DefaultSchedule != nil {
 				schedules = append(schedules, policy.Spec.DefaultSchedule)
@@ -231,12 +232,18 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 				if depPolicy.Name == deployment.Name && depPolicy.Schedule != nil {
 					schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
 					minReplicas = depPolicy.MinReplicas
+					depOptOut = depPolicy.OptOut
 					break
 				} else if depPolicy.Name == deployment.Name {
 					minReplicas = depPolicy.MinReplicas
 					break
 				}
 			}
+
+			if depOptOut { // Check the optOut field for Deployment
+                log.Info("Deployment opted out of scaling", "deployment", deployment.Name, "namespace", namespace)
+                continue // Skip to the next deployment
+            }
 
 			if r.isScalingTime(schedules, policy.Spec.Timezone, time.Now()) {
 				log.Info("Scaling time is true", "deployment", deployment.Name, "namespace", deployment.Namespace)

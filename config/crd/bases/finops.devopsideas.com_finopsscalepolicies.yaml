@@ -71,6 +71,8 @@ spec:
                       type: integer
                     name:
                       type: string
+                    optOut:
+                      type: boolean
                     schedule:
                       description: ScheduleSpec defines a scaling schedule using time
                         ranges and days of the week.

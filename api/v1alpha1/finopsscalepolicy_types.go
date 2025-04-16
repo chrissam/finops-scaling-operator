@@ -23,11 +23,24 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// ScheduleSpec defines a scaling schedule using time ranges and days of the week.
+type ScheduleSpec struct {
+	// Days of the week to apply the schedule. Use "*" for every day.
+	Days []string `json:"days"`
+
+	// Start time of the scaling window in HH:MM format (24-hour).
+	StartTime string `json:"startTime"`
+
+	// End time of the scaling window in HH:MM format (24-hour).
+	EndTime string `json:"endTime"`
+}
+
 // DeploymentScale defines scaling rules for a specific deployment
 type DeploymentScale struct {
-	Name        string `json:"name"`
-	Schedule    []string `json:"schedule,omitempty"`
-	MinReplicas int32    `json:"minReplicas,omitempty"`
+	Name        string        `json:"name"`
+	Schedule    *ScheduleSpec `json:"schedule,omitempty"` // Changed to *ScheduleSpec
+	MinReplicas int32         `json:"minReplicas,omitempty"`
+	OptOut      bool          `json:"optOut,omitempty"`
 }
 
 // FinOpsScalePolicySpec defines the desired state of FinOpsScalePolicy.
@@ -35,7 +48,7 @@ type FinOpsScalePolicySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	OptOut          bool              `json:"optOut,omitempty"`
-	DefaultSchedule []string            `json:"defaultSchedule,omitempty"`
+	DefaultSchedule *ScheduleSpec     `json:"defaultSchedule,omitempty"` // Changed to *ScheduleSpec
 	Timezone        string            `json:"timezone,omitempty"`
 	Deployments     []DeploymentScale `json:"deployments,omitempty"`
 }
