@@ -40,9 +40,27 @@ spec:
             description: FinOpsScalePolicySpec defines the desired state of FinOpsScalePolicy.
             properties:
               defaultSchedule:
-                items:
-                  type: string
-                type: array
+                description: ScheduleSpec defines a scaling schedule using time ranges
+                  and days of the week.
+                properties:
+                  days:
+                    description: Days of the week to apply the schedule. Use "*" for
+                      every day.
+                    items:
+                      type: string
+                    type: array
+                  endTime:
+                    description: End time of the scaling window in HH:MM format (24-hour).
+                    type: string
+                  startTime:
+                    description: Start time of the scaling window in HH:MM format
+                      (24-hour).
+                    type: string
+                required:
+                - days
+                - endTime
+                - startTime
+                type: object
               deployments:
                 items:
                   description: DeploymentScale defines scaling rules for a specific
@@ -54,9 +72,28 @@ spec:
                     name:
                       type: string
                     schedule:
-                      items:
-                        type: string
-                      type: array
+                      description: ScheduleSpec defines a scaling schedule using time
+                        ranges and days of the week.
+                      properties:
+                        days:
+                          description: Days of the week to apply the schedule. Use
+                            "*" for every day.
+                          items:
+                            type: string
+                          type: array
+                        endTime:
+                          description: End time of the scaling window in HH:MM format
+                            (24-hour).
+                          type: string
+                        startTime:
+                          description: Start time of the scaling window in HH:MM format
+                            (24-hour).
+                          type: string
+                      required:
+                      - days
+                      - endTime
+                      - startTime
+                      type: object
                   required:
                   - name
                   type: object

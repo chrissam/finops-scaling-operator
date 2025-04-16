@@ -22,8 +22,9 @@ import (
 	"sync"
 	"time"
 	"strconv"
+	"strings"
 
-	"github.com/robfig/cron/v3"
+	//"github.com/robfig/cron/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	//metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -185,7 +186,7 @@ func (r *FinOpsScalePolicyReconciler) reconcileAllNamespaces(ctx context.Context
 
 func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, namespace string) error {
 	log := log.FromContext(ctx).WithValues("ReconcileNamespace", namespace)
-	log.Info("Entering reconcileNamespace", "namespace", namespace)
+	log.Info("Processing namespace...")
 
 	// Check namespace exclusion
 	for _, excludedNS := range r.Config.Spec.ExcludedNamespaces {
@@ -219,31 +220,37 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 				continue
 			}
 
-			deploymentSchedules := policy.Spec.DefaultSchedule
-			minReplicas := int32(0)
+			var schedules []*finopsv1alpha1.ScheduleSpec // Correct type
+			minReplicas := int32(0) // Default to 0 if not set
+
+			if policy.Spec.DefaultSchedule != nil {
+				schedules = append(schedules, policy.Spec.DefaultSchedule)
+			}
+
 			for _, depPolicy := range policy.Spec.Deployments {
-				if depPolicy.Name == deployment.Name {
-					deploymentSchedules = depPolicy.Schedule
+				if depPolicy.Name == deployment.Name && depPolicy.Schedule != nil {
+					schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
+					minReplicas = depPolicy.MinReplicas
+					break
+				} else if depPolicy.Name == deployment.Name {
 					minReplicas = depPolicy.MinReplicas
 					break
 				}
 			}
 
-			if r.isScalingTime(deploymentSchedules, policy.Spec.Timezone, time.Now()) {
+			if r.isScalingTime(schedules, policy.Spec.Timezone, time.Now()) {
 				log.Info("Scaling time is true", "deployment", deployment.Name, "namespace", deployment.Namespace)
 				originalReplicas, err := r.getOriginalReplicas(&deployment)
 				if err != nil {
 					log.Error(err, "Failed to get original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
 					return err
 				}
-				// Robust nil checks
 				if originalReplicas == nil && *deployment.Spec.Replicas > minReplicas {
 					log.Info("Original replicas not found, storing...", "deployment", deployment.Name, "namespace", deployment.Namespace, "replicas", *deployment.Spec.Replicas)
 					if err := r.storeOriginalReplicas(&deployment, *deployment.Spec.Replicas); err != nil {
 						log.Error(err, "Failed to store original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
 						return err
 					}
-					log.Info("Stored original replicas", "deployment", deployment.Name, "namespace", deployment.Namespace, "replicas", *deployment.Spec.Replicas)
 					if err := r.scaleDeployment(ctx, &deployment, minReplicas); err != nil {
 						log.Error(err, "Failed to scale down deployment", "deployment", deployment.Name, "namespace", deployment.Namespace, "minReplicas", minReplicas)
 						return err
@@ -267,7 +274,6 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 					log.Error(err, "Failed to get original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
 					return err
 				}
-				// Robust nil checks
 				if originalReplicas != nil && *deployment.Spec.Replicas != *originalReplicas {
 					log.Info("Original replicas changed, scaling up...", "deployment", deployment.Name, "namespace", deployment.Namespace, "originalReplicas", *originalReplicas, "currentReplicas", *deployment.Spec.Replicas)
 					if err := r.scaleDeployment(ctx, &deployment, *originalReplicas); err != nil {
@@ -279,9 +285,9 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 						log.Error(err, "Failed to clear original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
 						return err
 					}
-					log.Info("Cleared original replicas annotation", "deployment", deployment.Name, "namespace", deployment.Namespace)
+					log.Info("Successfully scaled up deployment", "deployment", deployment.Name, "namespace", deployment.Namespace)
 				} else {
-					log.Info("No scaling required: Desired replicas match current replicas", "deployment", deployment.Name, "namespace", deployment.Namespace)
+					log.Info("No scaling required for deployment", "deployment", deployment.Name, "namespace", deployment.Namespace)
 				}
 			}
 		}
@@ -301,45 +307,79 @@ func (r *FinOpsScalePolicyReconciler) isDeploymentExcluded(namespace, name strin
 	return false
 }
 
-// isScalingTime checks if the current time matches any of the cron schedules.
-func (r *FinOpsScalePolicyReconciler) isScalingTime(cronSchedules []string, timezone string, now time.Time) bool {
-	if len(cronSchedules) == 0 {
+// isScalingTime checks if the current time matches any of the provided time ranges.
+func (r *FinOpsScalePolicyReconciler) isScalingTime(schedules []*finopsv1alpha1.ScheduleSpec, timezone string, now time.Time) bool {
+    log := log.FromContext(context.Background())
+    loc, err := time.LoadLocation(timezone)
+    if err != nil {
+        log.Error(err, "Failed to load timezone, skipping the namespace", "timezone", timezone)
 		return false
-	}
+    }
 
-	loc, err := time.LoadLocation(timezone)
-	if err == nil {
-		//now = now.In(loc)
-		return false
-	}
+    for _, schedule := range schedules {
+        if schedule == nil {
+            continue // Skip nil schedules
+        }
 
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	for _, cronSchedule := range cronSchedules {
-		schedule, err := parser.Parse(cronSchedule)
-		if err != nil {
-			// Log the error and continue to the next schedule
-			log.Log.Error(err, "Invalid cron schedule", "schedule", cronSchedule)
-			continue
-		}
+        if r.isDayActive(schedule.Days, now.In(loc)) && r.isTimeWithinRange(schedule.StartTime, schedule.EndTime, now.In(loc)) {
+            log.Info("Current time is within schedule", "schedule", schedule, "now", now.In(loc))
+            return true
+        }
+        log.Info("Current time is NOT within schedule", "schedule", schedule, "now", now.In(loc))
+    }
 
-		nextRun := schedule.Next(now.Add(-time.Minute))
-		// Approximate previous run (similar to before)
-		approxPrevRun := now.Add(time.Hour * -24)
-		for i := 0; i < 1000; i++ {
-			tempNext := schedule.Next(approxPrevRun)
-			if tempNext.Before(now.Add(time.Minute)) && tempNext.After(approxPrevRun) {
-				approxPrevRun = tempNext
-			} else {
-				break
-			}
-			approxPrevRun = approxPrevRun.Add(time.Minute)
-		}
+    return false
+}
 
-		if now.After(approxPrevRun) && now.Before(nextRun) {
-			return true // Return true if ANY schedule matches
-		}
-	}
-	return false // Return false if NONE of the schedules match
+// isDayActive checks if the given day is active in the schedule.
+func (r *FinOpsScalePolicyReconciler) isDayActive(days []string, now time.Time) bool {
+    log := log.FromContext(context.Background())
+    log.Info("Entering isDayActive", "days", days, "now.Weekday()", now.Weekday().String()[:3]) // Log input
+
+    for _, day := range days {
+        if day == "*" || strings.EqualFold(day, now.Weekday().String()[:3]) {
+            log.Info("Day is active", "day", day) // Log active day
+            return true
+        }
+    }
+    log.Info("Day is not active") // Log inactive
+    return false
+}
+
+// isTimeWithinRange checks if the given time is within the start and end times.
+func (r *FinOpsScalePolicyReconciler) isTimeWithinRange(startTimeStr string, endTimeStr string, now time.Time) bool {
+    startTime, err := time.ParseInLocation("15:04", startTimeStr, now.Location())
+    if err != nil {
+        log := log.FromContext(context.Background())
+        log.Error(err, "Invalid start time format", "startTime", startTimeStr)
+        return false
+    }
+
+    endTime, err := time.ParseInLocation("15:04", endTimeStr, now.Location())
+    if err != nil {
+        log := log.FromContext(context.Background())
+        log.Error(err, "Invalid end time format", "endTime", endTimeStr)
+        return false
+    }
+
+    // Set the date of startTime and endTime to the date of now for comparison
+    start := time.Date(now.Year(), now.Month(), now.Day(), startTime.Hour(), startTime.Minute(), 0, 0, now.Location())
+    end := time.Date(now.Year(), now.Month(), now.Day(), endTime.Hour(), endTime.Minute(), 0, 0, now.Location())
+
+    if endTime.Before(startTime) {
+        // End time is on the next day
+        endOfNextDay := end.AddDate(0, 0, 1)
+        if now.After(start) || (now.Before(end) && now.Day() != endOfNextDay.Day()) || (now.Before(endOfNextDay) && now.Day() == endOfNextDay.Day()) {
+            return true
+        }
+    } else {
+        // startTime and endTime are on the same day
+        if now.After(start) && now.Before(end) {
+            return true
+        }
+    }
+
+    return false
 }
 
 // scaleDeployment scales a deployment to the specified number of replicas
