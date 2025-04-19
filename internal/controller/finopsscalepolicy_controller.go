@@ -362,15 +362,14 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 			}
 
 			for _, depPolicy := range policy.Spec.Deployments {
-				if depPolicy.Name == deployment.Name && depPolicy.Schedule != nil {
-					schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
+				if depPolicy.Name == deployment.Name {
+					if depPolicy.Schedule != nil {
+						schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
+					}
 					minReplicas = depPolicy.MinReplicas
 					depOptOut = depPolicy.OptOut
 					break
-				} else if depPolicy.Name == deployment.Name {
-					minReplicas = depPolicy.MinReplicas
-					break
-				}
+				} 
 			}
 
 			if depOptOut { // Check the optOut field for Deployment
