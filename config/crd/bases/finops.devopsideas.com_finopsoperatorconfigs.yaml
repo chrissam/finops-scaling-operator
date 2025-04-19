@@ -65,6 +65,25 @@ spec:
                 type: array
               forceScaleDown:
                 type: boolean
+              forceScaleDownSchedule:
+                description: ScheduleSpec defines the global schedule for scaling
+                  when ForceScaleDown is true.
+                properties:
+                  days:
+                    items:
+                      type: string
+                    type: array
+                  endTime:
+                    type: string
+                  startTime:
+                    type: string
+                required:
+                - days
+                - endTime
+                - startTime
+                type: object
+              forceScaleDownTimezone:
+                type: string
               maxParallelOperations:
                 type: integer
             type: object

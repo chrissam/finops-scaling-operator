@@ -29,6 +29,13 @@ type ExcludedDeploy struct {
 	Name      string `json:"name"`
 }
 
+// ScheduleSpec defines the global schedule for scaling when ForceScaleDown is true.
+type GlobalScheduleSpec struct {
+    Days      []string `json:"days"`
+    StartTime string   `json:"startTime"`
+    EndTime   string     `json:"endTime"`
+}
+
 // FinOpsOperatorConfigSpec defines the desired state of FinOpsOperatorConfig.
 type FinOpsOperatorConfigSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -38,6 +45,8 @@ type FinOpsOperatorConfigSpec struct {
 	MaxParallelOperations int              `json:"maxParallelOperations,omitempty"`
 	CheckInterval         string           `json:"checkInterval,omitempty"`
 	ForceScaleDown        bool             `json:"forceScaleDown,omitempty"`
+	ForceScaleDownSchedule *GlobalScheduleSpec      `json:"forceScaleDownSchedule,omitempty"`
+	ForceScaleDownTimezone        string            `json:"forceScaleDownTimezone,omitempty"`
 }
 
 // FinOpsOperatorConfigStatus defines the observed state of FinOpsOperatorConfig.
