@@ -7,7 +7,10 @@ metadata:
   name: finopsscalepolicy-sample
 spec:
   optOut: false  # If true, this namespace is fully excluded from scaling
-  defaultSchedule:  ["Mon", "Tue", "Wed", "Thu", "Fri"]  
+  defaultSchedule:  
+    days: ["Mon", "Tue", "Wed", "Thu", "Fri"]  
+    startTime: "21:00"
+    endTime: "07:00"
   timezone: "America/Toronto"  # Default UTC, can be overridden per policy
   deployments:
     - name: "web-app"
