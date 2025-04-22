@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	corev1 "k8s.io/api/core/v1"
 
 	finopsv1alpha1 "github.com/chrissam/k8s-scaling-operator/api/v1alpha1"
 )
@@ -50,6 +51,7 @@ const (
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 
 // FinOpsScalePolicyReconciler reconciles a FinOpsScalePolicy object
 type FinOpsScalePolicyReconciler struct {
@@ -84,6 +86,8 @@ func (r *FinOpsScalePolicyReconciler) loadConfig(ctx context.Context) error {
 				MaxParallelOperations: 5,
 				CheckInterval:         "5m",
 				ForceScaleDown:        false,
+				ForceScaleDownSchedule: nil,
+				ForceScaleDownTimezone: "UTC", 
 			},
 		}
 	}
@@ -135,53 +139,182 @@ func (r *FinOpsScalePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *FinOpsScalePolicyReconciler) reconcileAllNamespaces(ctx context.Context) (ctrl.Result, error) {
-	log := log.FromContext(ctx).WithValues("ReconcileAll", "cluster")
-	log.Info("Starting cluster-wide scan...")
+    log := log.FromContext(ctx).WithValues("ReconcileAll", "cluster")
+    log.Info("Starting cluster-wide scan...")
 
-	var policies finopsv1alpha1.FinOpsScalePolicyList
-	if err := r.List(ctx, &policies); err != nil {
-		log.Error(err, "Failed to list FinOpsScalePolicies")
-		return ctrl.Result{}, err
-	}
+    var wg sync.WaitGroup
+    errChan := make(chan error) //  No buffer needed, will block if no receiver
 
-	namespaces := map[string]bool{}
-	for _, policy := range policies.Items {
-		namespaces[policy.Namespace] = true
-	}
+    if r.Config.Spec.ForceScaleDown && r.Config.Spec.ForceScaleDownSchedule != nil {
+        var namespaces corev1.NamespaceList
+        if err := r.List(ctx, &namespaces); err != nil {
+            log.Error(err, "Failed to list Namespaces")
+            return ctrl.Result{}, err
+        }
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(namespaces))
+        for _, namespace := range namespaces.Items {
+            if r.isNamespaceExcluded(namespace.Name) {
+                log.V(1).Info("Skipping excluded namespace", "namespace", namespace.Name)
+                continue
+            }
 
-	for ns := range namespaces {
-		wg.Add(1)
-		go func(namespace string) {
-			defer wg.Done()
-			r.sem <- struct{}{}        // Acquire semaphore
-			defer func() { <-r.sem }() // Release semaphore
-			if err := r.reconcileNamespace(ctx, namespace); err != nil {
-				errChan <- err
-			}
-		}(ns)
-	}
+            wg.Add(1)
+            go func(ns string) {
+                defer wg.Done()
+                r.sem <- struct{}{}
+                defer func() { <-r.sem }()
 
-	wg.Wait()
-	close(errChan)
+                var policies finopsv1alpha1.FinOpsScalePolicyList
+                if err := r.List(ctx, &policies, client.InNamespace(ns)); err != nil {
+                    errChan <- fmt.Errorf("failed to list FinOpsScalePolicies in namespace %s: %w", ns, err)
+                    return
+                }
 
-	for err := range errChan {
-		if err != nil {
-			log.Error(err, "Error during namespace reconciliation")
-			return ctrl.Result{}, err // Or collect errors and return a combined error
-		}
-	}
+				scalingTime := false
+				if r.Config.Spec.ForceScaleDownSchedule != nil { // Add nil check
+					tempSchedule := []*finopsv1alpha1.ScheduleSpec{
+						{
+							Days:      r.Config.Spec.ForceScaleDownSchedule.Days,
+							StartTime: r.Config.Spec.ForceScaleDownSchedule.StartTime,
+							EndTime:   r.Config.Spec.ForceScaleDownSchedule.EndTime,
+						},
+					}
+					scalingTime = r.isScalingTime(tempSchedule, r.Config.Spec.ForceScaleDownTimezone, time.Now())
+				}
 
-	interval, err := time.ParseDuration(r.Config.Spec.CheckInterval)
-	if err != nil {
-		log.Error(err, "Invalid CheckInterval, using default 5m")
-		interval = 5 * time.Minute
-	}
+                if len(policies.Items) == 0 { // No policy
+                    if scalingTime {
+                        log.Info("ForceScaleDown enabled and no policy found, scaling down namespace", "namespace", ns)
+                        if err := r.manageDeploymentsWithoutPolicy(ctx, ns, true); err != nil {
+                            errChan <- err
+                        }
+                    } else {
+                        log.V(1).Info("ForceScaleDown enabled, no policy, scaling up namespace", "namespace", ns)
+                        if err := r.manageDeploymentsWithoutPolicy(ctx, ns, false); err != nil {
+                            errChan <- err
+                        }
+                    }
 
-	log.Info("Cluster-wide scan completed.", "CheckInterval", interval)
-	return ctrl.Result{RequeueAfter: interval}, nil
+                } else { // Policy exists
+                    log.V(1).Info("FinOpsScalePolicy found, using policy to reconcile namespace", "namespace", ns)
+                    if err := r.reconcileNamespace(ctx, ns); err != nil {
+                        errChan <- err
+                    }
+                }
+            }(namespace.Name)
+        }
+
+    } else {
+        // Original logic: Reconcile namespaces with FinOpsScalePolicies
+        var policies finopsv1alpha1.FinOpsScalePolicyList
+        if err := r.List(ctx, &policies); err != nil {
+            log.Error(err, "Failed to list FinOpsScalePolicies")
+            return ctrl.Result{}, err
+        }
+
+        namespaces := map[string]bool{}
+        for _, policy := range policies.Items {
+            namespaces[policy.Namespace] = true
+        }
+
+        for ns := range namespaces {
+            wg.Add(1)
+            go func(namespace string) {
+                defer wg.Done()
+                r.sem <- struct{}{}
+                defer func() { <-r.sem }()
+                if err := r.reconcileNamespace(ctx, namespace); err != nil {
+                    errChan <- err
+                }
+            }(ns)
+        }
+    }
+
+    wg.Wait()
+    close(errChan)
+
+    for err := range errChan {
+        if err != nil {
+            log.Error(err, "Error during namespace reconciliation", "error", err)
+            return ctrl.Result{}, err
+        }
+    }
+
+    interval, err := time.ParseDuration(r.Config.Spec.CheckInterval)
+    if err != nil {
+        log.Error(err, "Invalid CheckInterval, using default 5m")
+        interval = 5 * time.Minute
+    }
+
+    log.Info("Cluster-wide scan completed.", "CheckInterval", interval)
+    return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+
+func (r *FinOpsScalePolicyReconciler) manageDeploymentsWithoutPolicy(ctx context.Context, namespace string, forceScaleDown bool) error {
+    log := log.FromContext(ctx).WithValues("manageDeploymentsWithoutPolicy", namespace)
+    log.Info("Entering manageDeploymentsWithoutPolicy", "namespace", namespace, "forceScaleDown", forceScaleDown)
+
+    var deployments appsv1.DeploymentList
+    if err := r.List(ctx, &deployments, client.InNamespace(namespace)); err != nil {
+        log.Error(err, "Failed to list deployments in namespace", "namespace", namespace)
+        return err
+    }
+
+    for _, deployment := range deployments.Items {
+        if r.isDeploymentExcluded(deployment.Namespace, deployment.Name) {
+            log.Info("Skipping excluded deployment", "deployment", deployment.Name, "namespace", deployment.Namespace)
+            continue
+        }
+
+        originalReplicas, err := r.getOriginalReplicas(&deployment)
+        if err != nil {
+            log.Error(err, "Failed to get original replicas annotation", "deployment", deployment.Name, "namespace", namespace)
+            return err
+        }
+
+        if forceScaleDown {
+            minReplicas := int32(0) // Or get from config if needed
+
+            if originalReplicas == nil && *deployment.Spec.Replicas > minReplicas {
+                // Not yet scaled down, store original and scale down
+                log.Info("Original replicas not found, storing and scaling down", "deployment", deployment.Name, "namespace", namespace, "replicas", *deployment.Spec.Replicas)
+                if err := r.storeOriginalReplicas(&deployment, *deployment.Spec.Replicas); err != nil {
+                    log.Error(err, "Failed to store original replicas annotation", "deployment", deployment.Name, "namespace", namespace)
+                    return err
+                }
+                if err := r.scaleDeployment(ctx, &deployment, minReplicas); err != nil {
+                    log.Error(err, "Failed to scale down deployment", "deployment", deployment.Name, "namespace", namespace, "minReplicas", minReplicas)
+                    return err
+                }
+
+            } else if originalReplicas != nil && *deployment.Spec.Replicas != 0 {
+                // Already scaled down, ensure it remains scaled down
+                log.V(1).Info("Already scaled down, ensuring it remains so", "deployment", deployment.Name, "namespace", namespace)
+                if err := r.scaleDeployment(ctx, &deployment, minReplicas); err != nil {
+                    log.Error(err, "Failed to scale down deployment", "deployment", deployment.Name, "namespace", namespace, "minReplicas", minReplicas)
+                    return err
+                }
+            }
+
+        } else {
+            // ForceScaleDown is false (or schedule is not active) - scale back up
+            if originalReplicas != nil {
+                log.Info("ForceScaleDown is false, scaling up", "deployment", deployment.Name, "namespace", namespace, "originalReplicas", *originalReplicas)
+                if err := r.scaleDeployment(ctx, &deployment, *originalReplicas); err != nil {
+                    log.Error(err, "Failed to scale up deployment", "deployment", deployment.Name, "namespace", namespace, "replicas", *originalReplicas)
+                    return err
+                }
+                if err := r.clearOriginalReplicas(&deployment); err != nil {
+                    log.Error(err, "Failed to clear original replicas annotation", "deployment", deployment.Name, "namespace", namespace)
+                    return err
+                }
+            } else {
+                log.V(1).Info("No original replicas found, skipping scale-up", "deployment", deployment.Name, "namespace", namespace)
+            }
+        }
+    }
+    return nil
 }
 
 func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, namespace string) error {
@@ -229,15 +362,14 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 			}
 
 			for _, depPolicy := range policy.Spec.Deployments {
-				if depPolicy.Name == deployment.Name && depPolicy.Schedule != nil {
-					schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
+				if depPolicy.Name == deployment.Name {
+					if depPolicy.Schedule != nil {
+						schedules = []*finopsv1alpha1.ScheduleSpec{depPolicy.Schedule} // Override with deployment-specific schedule
+					}
 					minReplicas = depPolicy.MinReplicas
 					depOptOut = depPolicy.OptOut
 					break
-				} else if depPolicy.Name == deployment.Name {
-					minReplicas = depPolicy.MinReplicas
-					break
-				}
+				} 
 			}
 
 			if depOptOut { // Check the optOut field for Deployment
@@ -303,6 +435,16 @@ func (r *FinOpsScalePolicyReconciler) reconcileNamespace(ctx context.Context, na
 	return nil
 }
 
+
+// isNamespaceExcluded checks if a namespace is globally excluded
+func (r *FinOpsScalePolicyReconciler) isNamespaceExcluded(namespace string) bool {
+    for _, excluded := range r.Config.Spec.ExcludedNamespaces {
+        if excluded == namespace {
+            return true
+        }
+    }
+    return false
+}
 
 // isDeploymentExcluded checks if a deployment is globally excluded
 func (r *FinOpsScalePolicyReconciler) isDeploymentExcluded(namespace, name string) bool {

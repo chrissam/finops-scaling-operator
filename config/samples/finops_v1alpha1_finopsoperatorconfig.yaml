@@ -9,10 +9,18 @@ spec:
   excludedNamespaces:
     - "kube-system"
     - "kube-public"
+    - "kube-node-lease"
+    - "local-path-storage"
+    - "scaling-operator-system"
   excludedDeployments:
     - namespace: "istio-system"
       name: "istio-ingressgateway"
   maxParallelOperations: 5
   checkInterval: "5m"  # Operator checks every 5 minutes
   forceScaleDown: false  # Admin-controlled, forces scale-down if no CR is present. Default is false
-  # TODO(user): Add fields here
+  forceScaleDownSchedule: # Schedule to follow when forceScaleDown is set to True
+     days: ["*"] 
+     startTime: "21:00"
+     endTime: "06:00"
+  forceScaleDownTimezone: America/Toronto # Timezone for global scaledown
+
