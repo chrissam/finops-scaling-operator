@@ -27,7 +27,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	finopsv1alpha1 "github.com/yourname/k8s-scaling-operator/api/v1alpha1"
+	finopsv1alpha1 "github.com/chrissam/k8s-scaling-operator/api/v1alpha1"
 )
 
 var _ = Describe("FinOpsScalePolicy Controller", func() {
