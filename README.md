@@ -1,125 +1,227 @@
-# scaling-operator
-// TODO(user): Add simple overview of use/purpose
+#   FinOps Scaling Operator
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+   This Kubernetes operator automates scaling of Deployments based on customizable schedules, helping to optimize resource utilization and reduce costs in your Kubernetes clusters.
 
-## Getting Started
+##   Purpose
 
-### Prerequisites
-- go version v1.23.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+   The FinOps Scaling Operator allows you to define policies that automatically scale Kubernetes Deployments up or down at specified times. This is useful for:
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+   * Cost Optimization: Scaling down non-critical applications during off-peak hours to consume fewer resources.
+   * Resource Management: Ensuring that applications have the necessary resources during peak times while freeing up resources when demand is low.
+   * Automation: Automating scaling tasks, reducing the need for manual intervention.
 
-```sh
-make docker-build docker-push IMG=<some-registry>/scaling-operator:tag
+##   Key Features
+
+   * Customizable Schedules: Define scaling schedules with specific days and time ranges.
+   * Timezone Support: Specify the timezone for your schedules to ensure accurate scaling.
+   * Granular Control: Configure scaling policies at the namespace or individual Deployment level.
+   * Exclusion Rules: Exclude specific namespaces or Deployments from scaling.
+   * Forceful Scaling: Optionally enforce scaling in namespaces even without specific policies, based on a global schedule.
+   * Operator Configuration: Global configuration options to control the operator's behavior.
+
+##   Custom Resources
+
+   The operator introduces the following Custom Resources:
+
+   * `FinOpsScalePolicy`: Defines the scaling schedules and target Deployments.
+   * `FinOpsOperatorConfig`: Configures the operator's global settings (e.g., excluded namespaces, scaling interval).
+
+##   Installation
+
+
+
+   There are two primary ways to install the FinOps Scaling Operator:
+
+   ###   1.  Using `make` (Kubebuilder)
+
+   If you have cloned the operator's source code, you can use the `make` commands provided by Kubebuilder to build and deploy the operator.
+
+   **Important:** This operator uses webhooks for validating or mutating requests. Therefore, cert-manager is a mandatory prerequisite to manage the required certificates.
+
+   **Prerequisites:**
+
+   * `kubectl`: The Kubernetes CLI tool.
+   * `make`: The GNU Make build automation tool.
+   * Go: The Go programming language (version X.Y or later - check your `go.mod` file).
+   * A Kubernetes cluster (e.g., Minikube, kind, or a cloud-based cluster).
+   * `cert-manager`: cert-manager must be installed in your cluster to manage certificates for the webhooks. Follow the [cert-manager installation instructions](https://cert-manager.io/docs/installation/) before proceeding.
+
+   **Steps:**
+
+   1.  Clone the repository:
+
+       ```bash
+       git clone <your-repository-url>
+       cd <your-operator-directory>
+       ```
+
+   2.  *(Optional)* If you need to modify the deployment (e.g., change the target namespace), edit the `config/manager/kustomization.yaml` file. [cite: 70, 71]
+
+   3.  Build and push the operator image (replace `<your-image>` with your desired image name and repository):
+
+       ```bash
+       make docker-build docker-push IMG=<your-image>
+       ```
+
+   4.  Deploy the operator to your Kubernetes cluster:
+
+       ```bash
+       make deploy
+       ```
+
+       This will install the CRDs, webhooks, and deploy the operator's controller manager.
+
+   ###   2.  Using Helm (Recommended)
+
+   The recommended way to install the FinOps Scaling Operator is using the Helm chart. Helm simplifies the deployment and management of the operator.
+
+   **Important:** This operator uses webhooks for validating or mutating requests. Therefore, cert-manager is a mandatory prerequisite to manage the required certificates.
+
+   **Prerequisites:**
+
+   * `kubectl`: The Kubernetes CLI tool.
+   * `helm`: The Helm CLI tool (version X.Y.Z or later - check `helm version`).
+   * A Kubernetes cluster (e.g., Minikube, kind, or a cloud-based cluster).
+   * `cert-manager`: cert-manager must be installed in your cluster to manage certificates for the webhooks. Follow the [cert-manager installation instructions](https://cert-manager.io/docs/installation/) before proceeding.
+
+   **Steps:**
+
+   1.  *(If you haven't packaged the chart yet)* Package the Helm chart:
+
+       ```bash
+       helm package ./charts/finops-scaling-operator
+       ```
+
+       This will create a `.tgz` file containing your chart.
+
+   2.  Install the Helm chart:
+
+       ```bash
+       helm install <release-name> <path-to-chart.tgz> -n <operator-namespace>
+       ```
+
+       * Replace `<release-name>` with a name for this installation of the operator.
+       * Replace `<path-to-chart.tgz>` with the path to the `.tgz` file created in the previous step.
+       * Replace `<operator-namespace>` with the namespace where you want to deploy the operator (e.g., `scaling-operator-system`). If the namespace doesn't exist, you may need to create it first. [cite: 69]
+
+   3.  *(Optional)* Customize the installation by providing a `values.yaml` file:
+
+       ```bash
+       helm install <release-name> <path-to-chart.tgz> -f <path-to-my-values.yaml> -n <operator-namespace>
+       ```
+
+       This allows you to override the default configuration values in the chart.
+
+   **Post-Installation**
+
+   After installing the operator, you can create `FinOpsScalePolicy` and `FinOpsOperatorConfig` resources to define your scaling policies. Refer to the [Configuration](#configuration) section for details.
+
+   **Important Notes:**
+
+   * The operator requires appropriate RBAC permissions to manage Deployments in the namespaces where you create `FinOpsScalePolicy` resources. The `make deploy` command and the Helm chart should handle this, but be sure to verify.
+
+
+##   Configuration
+
+###   FinOpsOperatorConfig
+
+   The `FinOpsOperatorConfig` CR allows you to configure the operator's global behavior. This is usually managed by the cluster admins. Only one instance of `FinOpsOperatorConfig` can be created in a cluster. Here's an example:
+
+   ```yaml
+   apiVersion: [finops.devopsideas.com/v1alpha1](https://finops.devopsideas.com/v1alpha1)
+   kind: FinOpsOperatorConfig
+   metadata:
+     name: global-config
+     namespace: scaling-operator-system # Operator's namespace
+   spec:
+     excludedNamespaces:
+       - kube-system
+       - kube-public
+     excludedDeployments:
+       - name: special-app
+         namespace: production
+     maxParallelOperations: 5
+     checkInterval: "5m"
+     forceScaleDown: true
+     forceScaleDownSchedule:
+       days: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+       startTime: "18:00"
+       endTime: "08:00"
+     forceScaleDownTimezone: "America/New_York"
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+**Configuration Options:**
 
-**Install the CRDs into the cluster:**
+-   `excludedNamespaces`: A list of namespaces that the operator should ignore.
+-   `excludedDeployments`: A list of specific Deployments (by name and namespace) to exclude.
+-   `maxParallelOperations`: The maximum number of scaling operations the operator can perform concurrently.
+-   `checkInterval`: How often the operator should scan the cluster for scaling activities.
+-   `forceScaleDown`: (***Use this with caution***) A boolean to enable forceful scaling in namespaces even without a `FinOpsScalePolicy`. Default is set to False
+-   `forceScaleDownSchedule`: A schedule to use for forceful scaling (if enabled).
+    -   `days`: The days of the week to apply the schedule (e.g., `["Mon", "Tue", "Wed", "Thu", "Fri"]` or `["*"]` for all days).
+    -   `startTime`: The start time of the scaling window (e.g., `"18:00"`).
+    -   `endTime`: The end time of the scaling window.
+-   `forceScaleDownTimezone`: The timezone for the forceful scaling schedule.
 
-```sh
-make install
+### FinOpsScalePolicy
+
+The `FinOpsScalePolicy` Custom Resource empowers users to define and enforce automated scaling policies for Deployments within their respective namespaces. This resource provides fine-grained control over when and how Deployments are scaled, enabling namespace administrators and application owners to optimize resource consumption according to their specific needs.
+
+YAML
+
+```
+apiVersion: [finops.devopsideas.com/v1alpha1](https://finops.devopsideas.com/v1alpha1)
+kind: FinOpsScalePolicy
+metadata:
+  name: my-policy
+  namespace: my-app-namespace
+spec:
+  timezone: "UTC"
+  defaultSchedule:
+    days: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    startTime: "20:00"
+    endTime: "06:00"
+  deployments:
+    - name: my-deployment
+      minReplicas: 1
+      schedule:
+        days: ["*"]
+        startTime: "22:00"
+        endTime: "04:00"
+      optOut: false
+    - name: another-deployment
+      minReplicas: 0
+      optOut: true
+
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+**Policy Options:**
 
-```sh
-make deploy IMG=<some-registry>/scaling-operator:tag
-```
+-   `timezone`: The timezone for the schedules in this policy.
+-   `defaultSchedule`: A default schedule that applies to all Deployments in the namespace (unless overridden by deployment specific schedule).
+    -   `days`: The days of the week for the schedule.
+    -   `startTime`: The start time of the scaling window.
+    -   `endTime`: The end time of the scaling window.
+-   `deployments`: A list of Deployment-specific scaling configurations.
+    -   `name`: The name of the Deployment.
+    -   `minReplicas`: The minimum number of replicas to scale the Deployment down to.
+    -   `schedule`: An optional schedule that overrides the `defaultSchedule` for this Deployment.
+    -   `optOut`: A boolean to prevent scaling for this Deployment.
+-   `optOut`: A boolean at the policy level to opt-out all deployments in the namespace.
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## How It Works
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+The operator continuously monitors the Kubernetes API for `FinOpsOperatorConfig` and `FinOpsScalePolicy` resources.
 
-```sh
-kubectl apply -k config/samples/
-```
+-   When a `FinOpsOperatorConfig` is created or updated, the operator reloads its configuration.
+-   The operator periodically scans the cluster (based on *checkInterval*) and checks if any Deployments need to be scaled based on the defined schedules.
+-   The operator uses annotations to store the original replica count of Deployments before scaling them down, allowing them to be scaled back up correctly.
 
->**NOTE**: Ensure that the samples has default values to test it out.
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/scaling-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/scaling-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
 ## License
 
-Copyright 2025.
+Copyright 2025 Christopher Sam K.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -132,4 +234,5 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
 
