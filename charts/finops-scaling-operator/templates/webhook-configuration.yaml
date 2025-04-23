@@ -1,0 +1,26 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "finops-scaling-operator.fullname" . }}-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ .Release.Namespace }}/{{ include "finops-scaling-operator.fullname" . }}-webhook-cert"
+  labels:
+    {{- include "finops-scaling-operator.labels" . | nindent 4 }}
+webhooks:
+  - name: vfinopsoperatorconfig-v1alpha1.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    rules:
+      - apiGroups: ["finops.devopsideas.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["finopsoperatorconfigs"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: {{ include "finops-scaling-operator.fullname" . }}-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-finops-devopsideas-com-v1alpha1-finopsoperatorconfig
+{{- end }}
