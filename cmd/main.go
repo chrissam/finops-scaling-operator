@@ -39,6 +39,7 @@ import (
 
 	finopsv1alpha1 "github.com/chrissam/k8s-scaling-operator/api/v1alpha1"
 	"github.com/chrissam/k8s-scaling-operator/internal/controller"
+	webhookfinopsv1alpha1 "github.com/chrissam/k8s-scaling-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -208,6 +209,13 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FinOpsScalePolicy")
 		os.Exit(1)
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err = webhookfinopsv1alpha1.SetupFinOpsOperatorConfigWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "FinOpsOperatorConfig")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

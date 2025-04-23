@@ -1,0 +1,26 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-finops-devopsideas-com-v1alpha1-finopsoperatorconfig
+  failurePolicy: Fail
+  name: vfinopsoperatorconfig-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - finops.devopsideas.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - finopsoperatorconfigs
+  sideEffects: None

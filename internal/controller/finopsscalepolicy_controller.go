@@ -23,6 +23,7 @@ import (
 	"time"
 	"strconv"
 	"strings"
+    "os"
 
 	//"github.com/robfig/cron/v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,7 +50,7 @@ const (
 // +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsscalepolicies,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=finops.devopsideas.com,resources=finopsoperatorconfigs,verbs=get;list;update;patch;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 
@@ -64,39 +65,55 @@ type FinOpsScalePolicyReconciler struct {
 
 // Load global FinOpsOperatorConfig into memory
 func (r *FinOpsScalePolicyReconciler) loadConfig(ctx context.Context) error {
-	log := log.FromContext(ctx)
-	log.Info("Loading FinOpsOperatorConfig...")
+    log := log.FromContext(ctx)
+    log.Info("Loading FinOpsOperatorConfig...")
 
-	var configList finopsv1alpha1.FinOpsOperatorConfigList
-	if err := r.List(ctx, &configList); err != nil {
-		log.Error(err, "Failed to list FinOpsOperatorConfig")
-		return err
-	}
+    var configList finopsv1alpha1.FinOpsOperatorConfigList
+    if err := r.List(ctx, &configList); err != nil {
+        log.Error(err, "Failed to list FinOpsOperatorConfig")
+        return err
+    }
 
-	if len(configList.Items) > 0 {
-		r.Config = &configList.Items[0] // Store first found config
-		log.Info("Loaded FinOpsOperatorConfig", "config", r.Config.Name)
-	} else {
-		log.Info("No FinOpsOperatorConfig found, using default values")
+    numConfigs := len(configList.Items)
+    if numConfigs == 0 {
+        log.Info("No FinOpsOperatorConfig found, using default values")
 
-		// Set default values
-		r.Config = &finopsv1alpha1.FinOpsOperatorConfig{
-			Spec: finopsv1alpha1.FinOpsOperatorConfigSpec{
-				ExcludedNamespaces:    []string{"kube-system", "kube-public", "kube-node-lease", "local-path-storage"},
-				MaxParallelOperations: 5,
-				CheckInterval:         "5m",
-				ForceScaleDown:        false,
-				ForceScaleDownSchedule: nil,
-				ForceScaleDownTimezone: "UTC", 
-			},
-		}
-	}
+        //  Set default values
+        r.Config = &finopsv1alpha1.FinOpsOperatorConfig{
+            Spec: finopsv1alpha1.FinOpsOperatorConfigSpec{
+                ExcludedNamespaces:    []string{"kube-system", "kube-public", "kube-node-lease", "local-path-storage"},
+                MaxParallelOperations: 5,
+                CheckInterval:         "5m",
+                ForceScaleDown:        false,
+                ForceScaleDownSchedule: nil,
+                ForceScaleDownTimezone: "UTC",
+            },
+        }
+    } else if numConfigs == 1 {
+        r.Config = &configList.Items[0] //  Store first found config
+        log.Info("Loaded FinOpsOperatorConfig", "config", r.Config.Name)
+    } else {
+        r.Config = &configList.Items[0] //  Use the first one
+        log.Info("WARNING: Multiple FinOpsOperatorConfig resources found. Using the first one.", "count", numConfigs, "configName", configList.Items[0].Name)
+    }
 
-	// Initialize semaphore
-	r.sem = make(chan struct{}, r.Config.Spec.MaxParallelOperations)
+    //  Initialize semaphore
+    r.sem = make(chan struct{}, r.Config.Spec.MaxParallelOperations)
 
-	return nil
+    return nil
 }
+
+// To get the namespace of the controller
+const namespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+func getControllerNamespace() (string, error) {
+    data, err := os.ReadFile(namespacePath)
+    if err != nil {
+        return "", fmt.Errorf("failed to read controller namespace: %w", err)
+    }
+    return strings.TrimSpace(string(data)), nil
+}
+
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -108,24 +125,37 @@ func (r *FinOpsScalePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	log.Info("Reconciling...")
 
-	// Load global FinOpsOperatorConfig
-	if r.Config == nil {
-		if err := r.loadConfig(ctx); err != nil {
-			log.Error(err, "Failed to load FinOpsOperatorConfig")
-			return ctrl.Result{}, err
-		}
-	}
+    controllerNamespace, err := getControllerNamespace()
+    if err != nil {
+        log.Error(err, "Unable to determine controller namespace")
+        return ctrl.Result{}, err
+    }
 
-	// Handle FinOpsOperatorConfig changes
-	if req.NamespacedName.Name == "global-config" && req.NamespacedName.Namespace == "scaling-operator-system" {
-		log.Info("Detected FinOpsOperatorConfig change, updating settings")
-		if err := r.loadConfig(ctx); err != nil {
-			log.Error(err, "Failed to reload FinOpsOperatorConfig")
-			return ctrl.Result{}, err
-		}
-		// Force immediate requeue after config change
-		return r.reconcileAllNamespaces(ctx) 
-	}
+	//  1.  Handle FinOpsOperatorConfig changes
+    var config finopsv1alpha1.FinOpsOperatorConfig
+    err = r.Get(ctx, req.NamespacedName, &config)
+    if err == nil {
+        if req.Namespace != controllerNamespace {
+            log.Info("Ignoring FinOpsOperatorConfig from a different namespace", "expectedNamespace", controllerNamespace, "gotNamespace", req.Namespace)
+            return ctrl.Result{}, nil
+        }
+
+        log.Info("Reconcile triggered by FinOpsOperatorConfig", "configName", req.Name, "configNamespace", req.Namespace)
+        if err := r.loadConfig(ctx); err != nil {
+            log.Error(err, "Failed to reload FinOpsOperatorConfig", "configName", req.Name, "configNamespace", req.Namespace)
+            return ctrl.Result{}, err
+        }
+        return r.reconcileAllNamespaces(ctx)
+    }
+
+    //  2.  Normal reconcile logic for other resources (FinOpsScalePolicy, etc.)
+    //  Load global FinOpsOperatorConfig (if not already loaded)
+    if r.Config == nil {
+        if err := r.loadConfig(ctx); err != nil {
+            log.Error(err, "Failed to load FinOpsOperatorConfig")
+            return ctrl.Result{}, err
+        }
+    }
 
 	// Trigger periodic scan or specific namespace reconcile
 	if req.NamespacedName.Name == "" && req.NamespacedName.Namespace == "" {
