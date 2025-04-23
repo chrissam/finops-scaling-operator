@@ -1,0 +1,15 @@
+{{- if and .Values.webhook.enabled .Values.webhook.certManager }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "finops-scaling-operator.fullname" . }}-webhook-cert
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: {{ .Values.webhook.certs.secretName }}
+  issuerRef:
+    name: {{ .Values.webhook.certs.issuerName }}
+    kind: Issuer
+  dnsNames:
+    - {{ include "finops-scaling-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+    - {{ include "finops-scaling-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc.cluster.local
+{{- end }}
