@@ -42,7 +42,7 @@
 
    * `kubectl`: The Kubernetes CLI tool.
    * `make`: The GNU Make build automation tool.
-   * Go: The Go programming language (version X.Y or later - check your `go.mod` file).
+   * Go: The Go programming language, version 1.23.0 or later.
    * A Kubernetes cluster (e.g., Minikube, kind, or a cloud-based cluster).
    * `cert-manager`: cert-manager must be installed in your cluster to manage certificates for the webhooks. Follow the [cert-manager installation instructions](https://cert-manager.io/docs/installation/) before proceeding.
 
