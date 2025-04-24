@@ -137,12 +137,13 @@
      excludedNamespaces:
        - kube-system
        - kube-public
+       - cert-manager
      excludedDeployments:
        - name: special-app
          namespace: production
      maxParallelOperations: 5
      checkInterval: "5m"
-     forceScaleDown: true
+     forceScaleDown: false
      forceScaleDownSchedule:
        days: ["Mon", "Tue", "Wed", "Thu", "Fri"]
        startTime: "18:00"
@@ -152,11 +153,11 @@
 
 **Configuration Options:**
 
--   `excludedNamespaces`: A list of namespaces that the operator should ignore.
+-   `excludedNamespaces`: A list of namespaces that the operator should ignore. Ensure to add the namespaces that are required for the overall k8s operations like kube-system, cert-manager, istio-system etc.
 -   `excludedDeployments`: A list of specific Deployments (by name and namespace) to exclude.
 -   `maxParallelOperations`: The maximum number of scaling operations the operator can perform concurrently.
 -   `checkInterval`: How often the operator should scan the cluster for scaling activities.
--   `forceScaleDown`: (***Use this with caution***) A boolean to enable forceful scaling in namespaces even without a `FinOpsScalePolicy`. Default is set to False
+-   `forceScaleDown`: (***Use this with caution in Prod cluster***) - A boolean to enable forceful scaling in namespaces even without a `FinOpsScalePolicy`. Default is set to False
 -   `forceScaleDownSchedule`: A schedule to use for forceful scaling (if enabled).
     -   `days`: The days of the week to apply the schedule (e.g., `["Mon", "Tue", "Wed", "Thu", "Fri"]` or `["*"]` for all days).
     -   `startTime`: The start time of the scaling window (e.g., `"18:00"`).
