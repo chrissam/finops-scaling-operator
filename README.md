@@ -128,7 +128,7 @@
    The `FinOpsOperatorConfig` CR allows you to configure the operator's global behavior. This is usually managed by the cluster admins. Only one instance of `FinOpsOperatorConfig` can be created in a cluster. Here's an example:
 
    ```yaml
-   apiVersion: [finops.devopsideas.com/v1alpha1](https://finops.devopsideas.com/v1alpha1)
+   apiVersion: finops.devopsideas.com/v1alpha1
    kind: FinOpsOperatorConfig
    metadata:
      name: global-config
@@ -171,7 +171,7 @@ The `FinOpsScalePolicy` Custom Resource empowers users to define and enforce aut
 YAML
 
 ```
-apiVersion: [finops.devopsideas.com/v1alpha1](https://finops.devopsideas.com/v1alpha1)
+apiVersion: finops.devopsideas.com/v1alpha1
 kind: FinOpsScalePolicy
 metadata:
   name: my-policy
