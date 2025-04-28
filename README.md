@@ -168,9 +168,8 @@
 
 The `FinOpsScalePolicy` Custom Resource empowers users to define and enforce automated scaling policies for Deployments within their respective namespaces. This resource provides fine-grained control over when and how Deployments are scaled, enabling namespace administrators and application owners to optimize resource consumption according to their specific needs.
 
-YAML
 
-```
+``` yaml
 apiVersion: finops.devopsideas.com/v1alpha1
 kind: FinOpsScalePolicy
 metadata:
